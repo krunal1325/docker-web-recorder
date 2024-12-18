@@ -1,13 +1,9 @@
-import { execSync } from 'node:child_process'
+import { spawn } from 'child_process'
 
 import * as puppeteer from 'puppeteer-core'
 
-import getExporter from './exporters'
-import { durationToFFmpegParams } from './ffmpeg'
-
 const url = process.env.URL
 const resolution = process.env.RESOLUTION
-const rate = process.env.RATE || 6000
 
 async function main() {
   if (!url) throw new Error('URL environment variable is required')
@@ -19,13 +15,6 @@ async function main() {
   const resolutionHeight = parseInt(resolutionSplit[1], 10)
   if (!resolutionWidth || !resolutionHeight)
     throw new Error('RESOLUTION must be in the format of 1280x720')
-
-  const exporter = getExporter(process.env.OUTPUT || 'output.mp4')
-  await exporter.initializeExport()
-
-  const ffmpegDurationParams = durationToFFmpegParams(
-    process.env.DURATION || '',
-  )
 
   const browser = await puppeteer.launch({
     executablePath: '/usr/bin/chromium-browser',
@@ -52,36 +41,64 @@ async function main() {
   })
 
   const page = await browser.newPage()
-  page.on('console', (msg) => console.log(msg.text()))
   await page.goto(url, { waitUntil: 'domcontentloaded' })
   await new Promise((resolve) => setTimeout(resolve, 2000))
 
-  // This can be used to unmute a video, or anything else needed. Example for a show on Voggt:
-  // await page.evaluate(
-  //   `
-  //   try {
-  //   const volumeButton = document.querySelector("div.flex.cursor-pointer.items-center.justify-center.gap-2");
-  //   volumeButton.children[0].click()
-  //   } catch (e) {}
-  //   `,
-  // )
+  const ffmpegCmd = 'ffmpeg'
+  const ffmpegArgs = [
+    '-y',
+    '-hide_banner',
+    '-async',
+    '1',
+    '-nostdin',
+    '-f',
+    'pulse',
+    '-ac',
+    '2',
+    '-i',
+    'default',
+    '-c:a',
+    'libmp3lame',
+    '-b:a',
+    '128k',
+    '-ar',
+    '44100',
+    '-f',
+    'segment',
+    '-segment_time',
+    '60',
+    '-reset_timestamps',
+    '1',
+    './recordings/segment%d.mp3',
+  ]
 
-  const ffmpegCmd =
-    `ffmpeg -y -hide_banner -async 1 -nostdin -s ${resolution} -r 30 -draw_mouse 0
-    -f x11grab -i $DISPLAY
-    -f pulse -ac 2 -i default
-    -c:v libx264 -preset veryfast -tune zerolatency -b:v ${rate}k -minrate ${rate}k -maxrate ${rate}k -g 30
-    -c:a aac -b:a 128k -ac 2 -ar 44100
-    -ss 00:00:03 ${ffmpegDurationParams} -pix_fmt yuv420p ${exporter.getFFmpegOutputParams()}`.replaceAll(
-      /[\n\r\s]+/gm,
-      ' ',
-    )
+  return new Promise((resolve, reject) => {
+    const process = spawn(ffmpegCmd, ffmpegArgs, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
 
-  execSync(ffmpegCmd)
+    process.stdout.on('data', (data) => {
+      console.log(`FFmpeg stdout: ${data}`)
+    })
+
+    process.stderr.on('data', (data) => {
+      console.error(`FFmpeg stderr: ${data}`)
+    })
+
+    process.on('close', (code) => {
+      if (code === 0) {
+        resolve('Recording process completed successfully')
+      } else {
+        reject(new Error(`FFmpeg process exited with code ${code}`))
+      }
+    })
+
+    process.on('error', (err) => {
+      reject(err)
+    })
+  })
 
   await browser.close()
-
-  await exporter.finalizeExport()
 }
 
 main().catch((err) => {
